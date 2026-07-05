@@ -3,7 +3,7 @@
 // Supports split and unified view modes with line numbers.
 
 import * as React from "react"
-import { DiffRenderable, RGBA, SyntaxStyle } from "@opentuah/core"
+import { RGBA, SyntaxStyle, type DiffRenderable, type LineNumberRenderable, type LineColorConfig } from "@opentuah/core"
 import { getSyntaxTheme, getResolvedTheme, rgbaToHex } from "../themes.js"
 import { balanceDelimiters } from "../balance-delimiters.js"
 
@@ -34,6 +34,69 @@ export interface DiffViewProps {
   selectionColor?: string
 }
 
+type PrivateDiffRenderable = DiffRenderable & {
+  leftSide?: LineNumberRenderable
+  rightSide?: LineNumberRenderable
+}
+
+function getSideLineColorConfig(
+  side: LineNumberRenderable | undefined,
+  line: number,
+): LineColorConfig | null {
+  if (!side) return null
+  const { gutter, content } = side.getLineColors()
+  const g = gutter.get(line)
+  const c = content.get(line)
+  if (!g && !c) return null
+  const config: LineColorConfig = {}
+  if (g) config.gutter = g
+  if (c) config.content = c
+  return config
+}
+
+function snapshotLineColors(
+  diffRenderable: DiffRenderable,
+  line: number,
+): { left: LineColorConfig | null; right: LineColorConfig | null } {
+  const { leftSide, rightSide } = diffRenderable as unknown as PrivateDiffRenderable
+  return {
+    left: getSideLineColorConfig(leftSide, line),
+    right: getSideLineColorConfig(rightSide, line),
+  }
+}
+
+function isTransparent(color: RGBA | string | undefined): boolean {
+  if (!color) return true
+  if (typeof color === "string") return color.toLowerCase() === "transparent" || color === "#00000000"
+  return color.a === 0
+}
+
+function restoreSideLineColor(
+  side: LineNumberRenderable | undefined,
+  line: number,
+  color: LineColorConfig | null,
+): void {
+  if (!side) return
+  const hasVisibleColor = color && (
+    (color.gutter && !isTransparent(color.gutter)) ||
+    (color.content && !isTransparent(color.content))
+  )
+  if (hasVisibleColor) {
+    side.setLineColor(line, color)
+  } else {
+    side.clearLineColor(line)
+  }
+}
+
+function restoreLineColors(
+  diffRenderable: DiffRenderable,
+  line: number,
+  base: { left: LineColorConfig | null; right: LineColorConfig | null },
+): void {
+  const { leftSide, rightSide } = diffRenderable as unknown as PrivateDiffRenderable
+  restoreSideLineColor(leftSide, line, base.left)
+  restoreSideLineColor(rightSide, line, base.right)
+}
 function getLuminance(color: RGBA): number {
   return color.r * 0.2126 + color.g * 0.7152 + color.b * 0.0722
 }
@@ -156,26 +219,39 @@ export const DiffView = React.forwardRef<DiffViewRef, DiffViewProps>(function Di
     return selectionColor ?? "#264F78"
   }, [selectionColor])
 
-  // Track previously-applied highlights so we can clear only our own overrides.
-  const prevCursorRef = React.useRef<{ line: number; color: string } | null>(null)
-  const prevSelectionRef = React.useRef<{ start: number; end: number; color: string } | null>(null)
+  // Track previously-applied highlights so we can restore the original diff
+  // background colors instead of leaving lines blank after the cursor moves.
+  interface SideBaseColor {
+    left: LineColorConfig | null
+    right: LineColorConfig | null
+  }
+
+  const prevCursorRef = React.useRef<{ line: number; base: SideBaseColor } | null>(null)
+  const prevSelectionRef = React.useRef<{ start: number; end: number; color: string; base: Map<number, SideBaseColor> } | null>(null)
+
+  // Reset highlight tracking when the underlying diff surface is rebuilt so
+  // we do not try to clear lines on a stale renderable.
+  React.useEffect(() => {
+    prevCursorRef.current = null
+    prevSelectionRef.current = null
+  }, [diff, view, themeName])
 
   // Apply cursor line and selection highlights to the underlying DiffRenderable.
   React.useEffect(() => {
     const diffRenderable = diffRef.current
     if (!diffRenderable) return
 
-    // Clear previous cursor override.
+    // Restore previous cursor override.
     if (prevCursorRef.current) {
-      diffRenderable.clearLineColor(prevCursorRef.current.line)
+      restoreLineColors(diffRenderable, prevCursorRef.current.line, prevCursorRef.current.base)
     }
 
-    // Clear previous selection overrides.
+    // Restore previous selection overrides.
     if (prevSelectionRef.current) {
-      diffRenderable.clearHighlightLines(
-        prevSelectionRef.current.start,
-        prevSelectionRef.current.end,
-      )
+      const { start, end, base } = prevSelectionRef.current
+      for (let line = start; line <= end; line++) {
+        restoreLineColors(diffRenderable, line, base.get(line) ?? { left: null, right: null })
+      }
     }
 
     prevCursorRef.current = null
@@ -183,17 +259,25 @@ export const DiffView = React.forwardRef<DiffViewRef, DiffViewProps>(function Di
 
     if (!focused) return
 
+    // Snapshot the cursor line's base color before applying any override.
+    const cursorBase = snapshotLineColors(diffRenderable, cursorLine)
+
+    // Snapshot and apply selection range.
     if (selection) {
       const start = Math.min(selection.start, selection.end)
       const end = Math.max(selection.start, selection.end)
       if (end >= start) {
+        const selectionBase = new Map<number, SideBaseColor>()
+        for (let line = start; line <= end; line++) {
+          selectionBase.set(line, snapshotLineColors(diffRenderable, line))
+        }
         diffRenderable.highlightLines(start, end, activeSelectionColor)
-        prevSelectionRef.current = { start, end, color: activeSelectionColor }
+        prevSelectionRef.current = { start, end, color: activeSelectionColor, base: selectionBase }
       }
     }
 
     diffRenderable.setLineColor(cursorLine, activeCursorColor)
-    prevCursorRef.current = { line: cursorLine, color: activeCursorColor }
+    prevCursorRef.current = { line: cursorLine, base: cursorBase }
   }, [focused, cursorLine, selection, activeCursorColor, activeSelectionColor])
 
   return (

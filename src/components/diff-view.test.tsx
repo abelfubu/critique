@@ -2,6 +2,7 @@
 
 import * as React from "react"
 import { afterEach, describe, expect, it } from "bun:test"
+import { act } from "react"
 import { testRender } from "@opentuah/react/test-utils"
 import { getDataPaths } from "@opentuah/core"
 import { DiffView } from "./diff-view.js"
@@ -218,6 +219,31 @@ describe("DiffView", () => {
     useAppStore.setState({ themeName: "github" })
   })
 
+  it("uses transparent background for context lines when transparentBackground is enabled", async () => {
+    testSetup = await setupTest(
+      <DiffView
+        diff={sampleDiff}
+        view="unified"
+        filetype="txt"
+        themeName="github"
+        transparentBackground
+      />,
+      {
+        width: 80,
+        height: 8,
+      },
+    )
+
+    await testSetup.renderOnce()
+
+    const frame = testSetup.captureSpans()
+    const contextLine = getLineWithToken(frame, "keep")
+    const contextSpan = contextLine!.spans.find((span: any) => span.text === "keep")
+    expect(contextSpan).toBeDefined()
+    const bg = Array.from(contextSpan!.bg.buffer)
+    expect(bg[3]).toBeCloseTo(0, 4)
+  })
+
   it("updates diff background colors after theme switch", async () => {
     useAppStore.setState({ themeName: "github" })
 
@@ -382,6 +408,66 @@ describe("DiffView", () => {
       expect.closeTo(52 / 255, 4),
       expect.closeTo(86 / 255, 4),
     ])
+  })
+
+  it("restores the diff background color when the cursor moves past a line", async () => {
+    let setCursorLine: (line: number) => void = () => {}
+
+    function CursorMoveHarness() {
+      const [line, setLine] = React.useState(2)
+      setCursorLine = setLine
+      return (
+        <DiffView
+          diff={sampleDiff}
+          view="unified"
+          filetype="txt"
+          themeName="github"
+          focused
+          cursorLine={line}
+          cursorColor="#123456"
+        />
+      )
+    }
+
+    testSetup = await setupTest(<CursorMoveHarness />, {
+      width: 80,
+      height: 8,
+    })
+
+    await testSetup.renderOnce()
+
+    // Capture the original context background before the cursor moves over it.
+    const frameBefore = testSetup.captureSpans()
+    const contextLineBefore = getLineWithToken(frameBefore, "keep")
+    expect(contextLineBefore).toBeDefined()
+    const contextBg = Array.from(contextLineBefore!.spans[0]!.bg.buffer).slice(0, 3)
+
+    // Move the cursor from the added line to the context line.
+    globalThis.IS_REACT_ACT_ENVIRONMENT = true
+    act(() => setCursorLine(3))
+    globalThis.IS_REACT_ACT_ENVIRONMENT = false
+    await testSetup.renderOnce()
+
+    const frameAfter = testSetup.captureSpans()
+    const addedLine = getLineWithToken(frameAfter, "new")
+    const removedLine = getLineWithToken(frameAfter, "old")
+    expect(addedLine).toBeDefined()
+    expect(removedLine).toBeDefined()
+
+    const addedSpan = addedLine!.spans.find((span: any) => span.text === "new")
+    const removedSpan = removedLine!.spans.find((span: any) => span.text === "old")
+    expect(addedSpan).toBeDefined()
+    expect(removedSpan).toBeDefined()
+
+    const addedBg = Array.from(addedSpan!.bg.buffer).slice(0, 3)
+    const removedBg = Array.from(removedSpan!.bg.buffer).slice(0, 3)
+
+    // After moving the cursor, the added and removed lines should show their
+    // original diff backgrounds, not the default context background.
+    expect(addedBg).not.toEqual(contextBg)
+    expect(removedBg).not.toEqual(contextBg)
+    // They should also be different from each other (added vs removed).
+    expect(addedBg).not.toEqual(removedBg)
   })
 
   it("does not highlight a cursor line when not focused", async () => {
