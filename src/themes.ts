@@ -2,6 +2,7 @@
 // Loads JSON theme files lazily on demand, resolves color references,
 // and provides both UI colors and Tree-sitter compatible syntax styles.
 
+import fs from "fs";
 import { parseColor, RGBA } from "@opentuah/core";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -142,10 +143,9 @@ function loadTheme(name: string): ThemeJson {
   }
 
   try {
-    // Resolve to src/themes/ — when built, import.meta.url is dist/, so ../src/ gets back to source
-    const srcDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../src");
-    const themePath = path.resolve(srcDir, "themes", fileName);
-    const fs = require("fs");
+    // Resolve themes relative to this module (src/themes/ in dev, dist/themes/ when built)
+    const themeDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "themes");
+    const themePath = path.resolve(themeDir, fileName);
     const content = fs.readFileSync(themePath, "utf-8");
     const themeJson = JSON.parse(content) as ThemeJson;
     themeCache[name] = themeJson;
